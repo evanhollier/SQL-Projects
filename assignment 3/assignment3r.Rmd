@@ -1,0 +1,189 @@
+---
+title: "Assignment 3"
+author: "Evan Hollier"
+date: "2023-03-01"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r include=FALSE }
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("RMySQL")
+library(RMySQL)
+library(ggplot2)
+library(HistData)
+```
+
+Connect to the mlb database.
+
+```{r}
+db = dbConnect(MySQL(), 
+                 user='root', 
+                 password='mysql', 
+                 dbname='mlb', 
+                 host='localhost')
+
+dbListTables(db)
+```
+
+**1) Plot a histogram of the players age as of January 1st, 2014. When the question asks for players, be sure and exclude the managers.**
+
+```{r}
+rs = dbSendQuery(db, 'SELECT player_id, birth_year, birth_month, birth_day 
+                      FROM mlb_master 
+                      WHERE player_id NOT IN
+                      (SELECT player_id FROM mlb_manager)'
+                 )
+dat = dbFetch(rs, n = -1) # n = -1 fetches all rows
+dat$age = as.integer(difftime(
+  "2014-1-1",
+  paste(dat$birth_year,dat$birth_month,dat$birth_day, sep='-')))
+dat$age = dat$age / 365
+ggplot(dat, aes(x=age)) +
+        geom_histogram(binwidth=1) +
+        ggtitle("Player Age")
+```
+
+**2) Do a regression on players heights and weights to get the mathematical relationship between the two. (get the slope and intercept of the regression).**\
+(Done in Python)\
+Y = -154.89 + 4.9455X\
+\
+**3) Plot the relationship between players age (as of Jan. 1, 2014) and batting average. Batting average is determined by dividing a player's hits by his total at-bats for a number between zero (shown as .000) and one (1.000). Do players get better or worse with age? What is the best age for a player?**
+
+```{r}
+rs = dbSendQuery(db, 'SELECT player_id, hits/at_bats AS batting_avg, team_id,
+                 hits, at_bats  
+                 FROM mlb_batting 
+                 WHERE at_bats>1 AND
+                 player_id NOT IN
+                 (SELECT player_id FROM mlb_manager)'
+                 )
+# Players whose have never been at bat are filtered.
+dat1 = dbFetch(rs, n = -1)
+dat1 <- merge(dat[c("player_id","age")], dat1, by="player_id")
+
+ggplot(dat1, aes(x = age, y = batting_avg)) +
+  geom_point() +
+  stat_smooth(method='lm')
+
+# Determine best age:
+dat1$flat_age = floor(dat1$age)
+batavg_age <- aggregate(hits~flat_age, dat1, sum)
+batavg_age <- merge(aggregate(at_bats~flat_age, dat1, sum), 
+                    batavg_age, by="flat_age")
+batavg_age$batting_avg = batavg_age$hits / batavg_age$at_bats
+
+batavg_age[batavg_age$batting_avg == max(batavg_age$batting_avg),]
+```
+
+Using linear regression, there doesn't seem to be any relationship between age and batting average. The line of regression is horizontal, meaning as age increases, batting average doesn't change. The age with the best batting average is 20.
+
+**4) Do heavier players hit more home runs per at bat than lighter players? Plot the relationship between weight vs home runs per at bat. Compare home runs per at bat for above average weight players to below average weight players? Is the difference statistically significant? Remember when calculating the average, don't average the averages. Sum up the home runs, sum up the at bats, then divide them.**
+
+```{r}
+rs = dbSendQuery(db, 'SELECT weight, 
+                 homeruns, at_bats
+                 FROM mlb_master
+                 INNER JOIN mlb_batting
+                 ON mlb_master.player_id = mlb_batting.player_id
+                 WHERE at_bats>20 AND
+                 mlb_master.player_id NOT IN
+                 (SELECT player_id FROM mlb_manager)'
+                 )
+dat2 = dbFetch(rs, n = -1)
+
+ggplot(dat2, aes(x = weight, y = homeruns/at_bats)) +
+  geom_jitter(size=0.6) +
+  stat_smooth(method='lm')
+
+# Compare above average to below average:
+avg_weight <- mean(dat2$weight)
+homerunavg_weight <- aggregate(homeruns~weight>avg_weight, dat2, sum)
+homerunavg_weight <- merge(aggregate(at_bats~weight>avg_weight, dat2, sum),   
+                           homerunavg_weight)
+homerunavg_weight$homerun_avg = homerunavg_weight$homeruns / homerunavg_weight$at_bats
+
+# Determine statistical significance
+true_homerun_avg = sum(homerunavg_weight$homeruns) / sum(homerunavg_weight$at_bats)
+dat2.below <- dat2[dat2$weight < avg_weight,]
+dat2.below$homerun_avg = dat2.below$homeruns / dat2.below$at_bats
+dat2.above <- dat2[dat2$weight > avg_weight,]
+dat2.above$homerun_avg = dat2.above$homeruns / dat2.above$at_bats
+
+t.test(dat2.below$homerun_avg, 
+       dat2.above$homerun_avg,
+       mu=true_homerun_avg)
+```
+
+Using linear regression, the relationship between weight and home run average is shown to be positive. The line of regression slopes upward, meaning as weight increases, home run average increases. The home run average is 0.01906026 for below average weight players, and 0.03176666 for above average. The home run average for all players is 0.02550918. Performing a Two Sample t-test on the home run averages above and below average weight indicates the difference in means is statistically significant.
+
+**5) Which team has the oldest average age for players? Is there a relationship between average age of players and winning percentage?**
+
+```{r}
+rs = dbSendQuery(db, 'SELECT player_id, mlb_batting.team_id FROM mlb_batting
+                      INNER JOIN mlb_team
+                      ON mlb_team.team_id = mlb_batting.team_id
+                      WHERE mlb_batting.player_id NOT IN
+                      (SELECT player_id FROM mlb_manager)'
+                 )
+dat3 = dbFetch(rs, n = -1)
+dat3 <- merge(dat[c("player_id","age")], dat3, by="player_id")
+dat3 <- aggregate(age~team_id, dat3, mean)
+dat3[dat3$age == max(dat3$age),]
+
+rs = dbSendQuery(db, 'SELECT team_id, wins/games as winrate FROM mlb_team')
+dat3.2 = dbFetch(rs, n = -1)
+dat3 <- merge(dat3, dat3.2, by="team_id")
+
+ggplot(dat3, aes(x = age, y = winrate)) +
+  geom_point() +
+  stat_smooth(method='lm')
+```
+
+New York Yankees (NYA) have the oldest average age for players. Using linear regression, the relationship between a team's average age and winning percentage is shown to be positive. The line of regression slopes upward, meaning as average age increases, winning percentage increases.
+
+**6) Calculate the percentage of times a player is caught stealing (from batting table: caught_stealing/(stolen_bases + caught_stealing) \* 100.\
+Is there a statistically significant difference between the best manager and the worst manager? Best manager being defined as the manager with the lowest percentage of times their players get caught stealing.**
+
+```{r}
+rs = dbSendQuery(db, 'SELECT team_id, stolen_bases, caught_stealing
+                      FROM mlb_batting
+                      WHERE mlb_batting.player_id NOT IN
+                      (SELECT player_id FROM mlb_manager)'
+                 )
+dat4 = dbFetch(rs, n = -1)
+dat4.ag <- aggregate(stolen_bases~team_id, dat4, sum)
+dat4.ag <- merge(aggregate(caught_stealing~team_id, dat4, sum),   
+                           dat4.ag)
+# Impossible to differentiate player stats based on manager stint, 
+# so stick with just team_id to represent a manager.
+dat4.ag$caught_rate = dat4.ag$caught_stealing / (dat4.ag$stolen_bases + dat4.ag$caught_stealing) * 100
+dat4.ag
+
+min(dat4.ag$caught_rate)
+max(dat4.ag$caught_rate)
+t.test(dat4.ag$caught_rate)
+```
+
+There is a statistically significant difference between the best manager and the worst manager. The best and worst managers' percentages of times their players get caught stealing are both well outside the 95 percent confidence interval for all managers.\
+\
+**7) For each team, calculate the batting average (hits/at_bats) for the team. Do all teams with better than average batting also have better than 50% winning percentage? Print a table with all the teams that have above average batting and less than 50% winning percentage.**
+
+```{r}
+dat5 <- aggregate(hits~team_id, dat1, sum)
+dat5 <- merge(aggregate(at_bats~team_id, dat1, sum), dat5, by="team_id")
+dat5$batting_avg = dat5$hits / dat5$at_bat
+dat5 <- merge(dat5[c("team_id", "batting_avg")], 
+              dat3[c("team_id", "winrate")], 
+              by="team_id")
+
+(true_batting_avg <- mean(dat5$batting_avg))
+dat5 <- dat5[dat5$batting_avg > true_batting_avg,]
+dat5 <- dat5[dat5$winrate < .5,]
+dat5
+```
+
+No, there are some teams with above average batting and less than 50% winning percentage. These teams are: CHA, COL, MIA, MIN, and TEX.
