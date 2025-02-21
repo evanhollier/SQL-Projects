@@ -1,0 +1,4 @@
+category=type
+sort authors
+when author is selected, populate first book in dropdown so it's not blank
+ignore publishers and authors with no books
